@@ -1,41 +1,17 @@
-# импортируем библиотеки
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import logging
+import json
+from geo import get_country, get_distance, get_coordinates
 
-# создаём приложение
-# мы передаём __name__, в нём содержится информация,
-# в каком модуле мы находимся.
-# В данном случае там содержится '__main__',
-# так как мы обращаемся к переменной из запущенного модуля.
-# если бы такое обращение, например, произошло внутри модуля logging,
-# то мы бы получили 'logging'
 app = Flask(__name__)
 
-# Устанавливаем уровень логирования
-logging.basicConfig(level=logging.INFO)
-
-# Создадим словарь, чтобы для каждой сессии общения
-# с навыком хранились подсказки, которые видел пользователь.
-# Это поможет нам немного разнообразить подсказки ответов
-# (buttons в JSON ответа).
-# Когда новый пользователь напишет нашему навыку,
-# то мы сохраним в этот словарь запись формата
-# sessionStorage[user_id] = {'suggests': ["Не хочу.", "Не буду.", "Отстань!" ]}
-# Такая запись говорит, что мы показали пользователю эти три подсказки.
-# Когда он откажется купить слона,
-# то мы уберем одну подсказку. Как будто что-то меняется :)
-sessionStorage = {}
+logging.basicConfig(level=logging.INFO, filename='app.log', format='%(asctime)s %(levelname)s %(name)s %(message)s')
 
 
 @app.route('/post', methods=['POST'])
-# Функция получает тело запроса и возвращает ответ.
-# Внутри функции доступен request.json - это JSON,
-# который отправила нам Алиса в запросе POST
 def main():
-    logging.info(f'Request: {request.json!r}')
+    logging.info('Request: %r', request.json)
 
-    # Начинаем формировать ответ, согласно документации
-    # мы собираем словарь, который потом отдадим Алисе
     response = {
         'session': request.json['session'],
         'version': request.json['version'],
@@ -44,87 +20,52 @@ def main():
         }
     }
 
-    # Отправляем request.json и response в функцию handle_dialog.
-    # Она сформирует оставшиеся поля JSON, которые отвечают
-    # непосредственно за ведение диалога
-    handle_dialog(request.json, response)
+    handle_dialog(response, request.json)
 
-    logging.info(f'Response:  {response!r}')
+    logging.info('Request: %r', response)
 
-    # Преобразовываем в JSON и возвращаем
-    return jsonify(response)
+    return json.dumps(response)
 
 
-def handle_dialog(req, res):
+def handle_dialog(res, req):
     user_id = req['session']['user_id']
 
     if req['session']['new']:
-        # Это новый пользователь.
-        # Инициализируем сессию и поприветствуем его.
-        # Запишем подсказки, которые мы ему покажем в первый раз
+        res['response']['text'] = 'Привет! Я могу сказать в какой стране город или сказать расстояние между городами!'
 
-        sessionStorage[user_id] = {
-            'suggests': [
-                "Не хочу.",
-                "Не буду.",
-                "Отстань!",
-            ]
-        }
-        # Заполняем текст ответа
-        res['response']['text'] = 'Привет! Купи слона!'
-        # Получим подсказки
-        res['response']['buttons'] = get_suggests(user_id)
         return
 
-    # Сюда дойдем только, если пользователь не новый,
-    # и разговор с Алисой уже был начат
-    # Обрабатываем ответ пользователя.
-    # В req['request']['original_utterance'] лежит весь текст,
-    # что нам прислал пользователь
-    # Если он написал 'ладно', 'куплю', 'покупаю', 'хорошо',
-    # то мы считаем, что пользователь согласился.
-    # Подумайте, всё ли в этом фрагменте написано "красиво"?
-    if req['request']['original_utterance'].lower() in [
-        'ладно',
-        'куплю',
-        'покупаю',
-        'хорошо'
-    ]:
-        # Пользователь согласился, прощаемся.
-        res['response']['text'] = 'Слона можно найти на Яндекс.Маркете!'
-        res['response']['end_session'] = True
-        return
+    cities = get_cities(req)
 
-    # Если нет, то убеждаем его купить слона!
-    res['response']['text'] = \
-        f"Все говорят '{req['request']['original_utterance']}', а ты купи слона!"
-    res['response']['buttons'] = get_suggests(user_id)
+    if len(cities) == 0:
+
+        res['response']['text'] = 'Ты не написал название не одного города!'
+
+    elif len(cities) == 1:
+
+        res['response']['text'] = 'Этот город в стране - ' + get_country(cities[0])
+
+    elif len(cities) == 2:
+
+        distance = get_distance(get_coordinates(cities[0]), get_coordinates(cities[1]))
+        res['response']['text'] = 'Расстояние между этими городами: ' + str(round(distance)) + ' км.'
+
+    else:
+
+        res['response']['text'] = 'Слишком много городов!'
 
 
-# Функция возвращает две подсказки для ответа.
-def get_suggests(user_id):
-    session = sessionStorage[user_id]
+def get_cities(req):
+    cities = []
 
-    # Выбираем две первые подсказки из массива.
-    suggests = [
-        {'title': suggest, 'hide': True}
-        for suggest in session['suggests'][:2]
-    ]
+    for entity in req['request']['nlu']['entities']:
 
-    # Убираем первую подсказку, чтобы подсказки менялись каждый раз.
-    session['suggests'] = session['suggests'][1:]
-    sessionStorage[user_id] = session
+        if entity['type'] == 'YANDEX.GEO':
 
-    # Если осталась только одна подсказка, предлагаем подсказку
-    # со ссылкой на Яндекс.Маркет.
-    if len(suggests) < 2:
-        suggests.append({
-            "title": "Ладно",
-            "url": "https://market.yandex.ru/search?text=слон",
-            "hide": True
-        })
+            if 'city' in entity['value'].keys():
+                cities.append(entity['value']['city'])
 
-    return suggests
+    return cities
 
 
 if __name__ == '__main__':
